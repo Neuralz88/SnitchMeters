@@ -36,6 +36,7 @@ public:
         }
         slotLen = (int) std::lround(sampleRate * 0.1);
         if (slotLen < 1) slotLen = 1;
+        gateBlocks.reserve(36000);   // an hour, so the audio thread rarely allocates
         reset();
     }
 
