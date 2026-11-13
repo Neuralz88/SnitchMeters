@@ -1,0 +1,7 @@
+build/
+build-tests/
+out/
+.superpowers/
+.vs/
+*.f32
+*.wav
