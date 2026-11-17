@@ -1,7 +1,16 @@
 #include "PluginEditor.h"
 
+namespace {
+const int kGap = 6;
+enum MenuId { kMenuExpand = 10, kMenuFreeze = 11, kMenuWave = 20, kMenuDock = 30, kMenuChannel = 40 };
+}
+
 SnitchEditor::SnitchEditor(SnitchProcessor& p) : AudioProcessorEditor(&p), plugin(p) {
-    addAndMakeVisible(scope);
+    addAndMakeVisible(wave);
+    wave.setView(plugin.waveZoom.load(), plugin.waveGain.load());
+    wave.onMenu = [this] { showMenu(); };
+    wave.onToggleExpand = [this] { setWaveExpanded(! plugin.waveExpanded.load()); };
+    wave.onViewChanged = [this] { plugin.waveZoom.store(wave.zoom()); plugin.waveGain.store(wave.gain()); };
     addAndMakeVisible(spectrum);
     addAndMakeVisible(stats);
     addAndMakeVisible(issueList);
@@ -30,7 +39,7 @@ void SnitchEditor::timerCallback() {
     snitch::Issue issues[16];
     const int n = detector.update(s, ref, dt, issues, 16);
 
-    scope.update(plugin.analyser(), s.active);
+    wave.update(plugin.analyser(), plugin.channel());
     spectrum.update(s, ref, issues, n);
     stats.update(s, ref);
     issueList.update(s, issues, n);
@@ -51,6 +60,12 @@ void SnitchEditor::paint(juce::Graphics& g) {
     g.drawText(footerLeft, footer.withTrimmedRight(footer.getWidth() / 2), juce::Justification::centredLeft);
     g.setColour(ui::dim);
     g.drawText(footerRight, footer.withTrimmedLeft(footer.getWidth() / 2), juce::Justification::centredRight);
+
+    if (! divider.isEmpty()) {   // grip
+        g.setColour(draggingDivider ? ui::accent : ui::line);
+        const bool upright = divider.getHeight() > divider.getWidth();
+        g.fillRoundedRectangle(divider.toFloat().withSizeKeepingCentre(upright ? 2.0f : 36.0f, upright ? 36.0f : 2.0f), 1.0f);
+    }
 }
 
 void SnitchEditor::paintOverChildren(juce::Graphics& g) {
@@ -67,18 +82,56 @@ void SnitchEditor::resized() {
     footer = area.removeFromBottom(16).reduced(4, 0);
     area.removeFromBottom(2);
 
-    const int gap = 6;
-    auto right = area.removeFromRight(juce::jlimit(190, 300, area.getWidth() * 28 / 100));
-    area.removeFromRight(gap);
-    // The scope gives way first when the window gets narrow.
-    const int scopeWidth = area.getWidth() < 420 ? 0 : area.getWidth() * 36 / 100;
-    scope.setVisible(scopeWidth > 0);
-    if (scopeWidth > 0) { scope.setBounds(area.removeFromLeft(scopeWidth)); area.removeFromLeft(gap); }
-    spectrum.setBounds(area);
+    content = area;
 
-    stats.setBounds(right.removeFromTop(juce::jlimit(96, 130, right.getHeight() * 46 / 100)));
-    right.removeFromTop(gap);
-    issueList.setBounds(right);
+    // The waveform takes its share of the window on the side it is docked to; the rest is meters.
+    const bool expanded = plugin.waveExpanded.load();
+    divider = {};
+    if (expanded) {
+        wave.setBounds(area);
+    } else {
+        const int dock = plugin.waveDock.load();
+        const bool stacked = dock == SnitchProcessor::kWaveTop || dock == SnitchProcessor::kWaveBottom;
+        const int total = stacked ? area.getHeight() : area.getWidth();
+        const int least = juce::jmin(70, total / 3);
+        const int size = juce::jlimit(least, juce::jmax(least, total - kGap - juce::jmin(stacked ? 150 : 240, total / 2)),
+                                      juce::roundToInt((float) total * plugin.waveShare.load()));
+        switch (dock) {
+            case SnitchProcessor::kWaveLeft:   wave.setBounds(area.removeFromLeft(size));   divider = area.removeFromLeft(kGap);   break;
+            case SnitchProcessor::kWaveRight:  wave.setBounds(area.removeFromRight(size));  divider = area.removeFromRight(kGap);  break;
+            case SnitchProcessor::kWaveBottom: wave.setBounds(area.removeFromBottom(size)); divider = area.removeFromBottom(kGap); break;
+            default:                           wave.setBounds(area.removeFromTop(size));    divider = area.removeFromTop(kGap);    break;
+        }
+    }
+    spectrum.setVisible(! expanded);
+    stats.setVisible(! expanded);
+    issueList.setVisible(! expanded);
+    if (! expanded) layoutMeters(area);
+}
+
+void SnitchEditor::layoutMeters(juce::Rectangle<int> area) {
+    if (area.getWidth() >= 430) {
+        auto right = area.removeFromRight(juce::jlimit(190, 300, area.getWidth() * 28 / 100));
+        area.removeFromRight(kGap);
+        spectrum.setBounds(area);
+        stats.setBounds(right.removeFromTop(juce::jlimit(juce::jmin(96, right.getHeight() / 2), 130, right.getHeight() * 46 / 100)));
+        right.removeFromTop(kGap);
+        issueList.setBounds(right);
+        return;
+    }
+    // Narrow (a window docked down the side of the screen): one above the other.
+    issueList.setBounds(area.removeFromBottom(juce::jlimit(60, 150, area.getHeight() * 28 / 100)));
+    area.removeFromBottom(kGap);
+    stats.setBounds(area.removeFromBottom(juce::jmin(110, area.getHeight() / 2)));
+    area.removeFromBottom(kGap);
+    spectrum.setVisible(area.getHeight() >= 70);
+    spectrum.setBounds(area);
+}
+
+void SnitchEditor::setWaveExpanded(bool shouldFill) {
+    plugin.waveExpanded.store(shouldFill);
+    resized();
+    repaint();
 }
 
 void SnitchEditor::filesDropped(const juce::StringArray& files, int, int) {
@@ -88,7 +141,34 @@ void SnitchEditor::filesDropped(const juce::StringArray& files, int, int) {
 }
 
 void SnitchEditor::mouseDown(const juce::MouseEvent& e) {
-    if (e.mods.isPopupMenu()) showMenu();
+    if (e.mods.isPopupMenu()) { showMenu(); return; }
+    draggingDivider = divider.contains(e.getPosition());
+    if (draggingDivider) repaint(divider);
+}
+
+void SnitchEditor::mouseDrag(const juce::MouseEvent& e) {
+    if (! draggingDivider || content.isEmpty()) return;
+    const auto p = e.getPosition();
+    float share = 0.5f;
+    switch (plugin.waveDock.load()) {
+        case SnitchProcessor::kWaveLeft:   share = (float) (p.x - content.getX()) / (float) content.getWidth(); break;
+        case SnitchProcessor::kWaveRight:  share = (float) (content.getRight() - p.x) / (float) content.getWidth(); break;
+        case SnitchProcessor::kWaveBottom: share = (float) (content.getBottom() - p.y) / (float) content.getHeight(); break;
+        default:                           share = (float) (p.y - content.getY()) / (float) content.getHeight(); break;
+    }
+    plugin.waveShare.store(juce::jlimit(0.1f, 0.9f, share));
+    resized();
+    repaint();
+}
+
+void SnitchEditor::mouseUp(const juce::MouseEvent&) {
+    if (draggingDivider) { draggingDivider = false; repaint(divider); }
+}
+
+void SnitchEditor::mouseMove(const juce::MouseEvent& e) {
+    const bool upright = divider.getHeight() > divider.getWidth();
+    setMouseCursor(! divider.contains(e.getPosition()) ? juce::MouseCursor::NormalCursor
+                   : upright ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::UpDownResizeCursor);
 }
 
 void SnitchEditor::showMenu() {
@@ -97,7 +177,36 @@ void SnitchEditor::showMenu() {
     menu.addItem(2, "Reset reference to Concussion (Mefjus Remix)");
     menu.addSeparator();
     menu.addItem(3, "Reset meters");
+    menu.addSeparator();
+
+    // The issues and the phase bar always judge the whole mix.
+    const int channel = plugin.channel();
+    juce::PopupMenu channelMenu;
+    const char* channels[] = { "Stereo (whole mix)", "Left", "Right", "Mid (L+R)", "Side (L-R)" };
+    for (int i = 0; i < snitch::kViews; ++i) channelMenu.addItem(kMenuChannel + i, channels[i], true, channel == i);
+    menu.addSubMenu("Channel", channelMenu);
+
+    const int waveDock = plugin.waveDock.load();
+    const bool expanded = plugin.waveExpanded.load();
+    juce::PopupMenu waveMenu;
+    waveMenu.addItem(kMenuWave + SnitchProcessor::kWaveTop, "Top", true, ! expanded && waveDock == SnitchProcessor::kWaveTop);
+    waveMenu.addItem(kMenuWave + SnitchProcessor::kWaveBottom, "Bottom", true, ! expanded && waveDock == SnitchProcessor::kWaveBottom);
+    waveMenu.addItem(kMenuWave + SnitchProcessor::kWaveLeft, "Left side", true, ! expanded && waveDock == SnitchProcessor::kWaveLeft);
+    waveMenu.addItem(kMenuWave + SnitchProcessor::kWaveRight, "Right side", true, ! expanded && waveDock == SnitchProcessor::kWaveRight);
+    waveMenu.addSeparator();
+    waveMenu.addItem(kMenuExpand, "Expanded (fills the window)", true, expanded);
+    menu.addSubMenu("Waveform", waveMenu);
+    menu.addItem(kMenuFreeze, "Freeze waveform", true, wave.isFrozen());
+
     if (plugin.isStandalone()) {
+        const int windowDock = plugin.windowDock.load();
+        juce::PopupMenu dockMenu;
+        dockMenu.addItem(kMenuDock + SnitchProcessor::kFloating, "Floating", true, windowDock == SnitchProcessor::kFloating);
+        dockMenu.addItem(kMenuDock + SnitchProcessor::kDockTop, "Top of the screen", true, windowDock == SnitchProcessor::kDockTop);
+        dockMenu.addItem(kMenuDock + SnitchProcessor::kDockBottom, "Bottom of the screen", true, windowDock == SnitchProcessor::kDockBottom);
+        dockMenu.addItem(kMenuDock + SnitchProcessor::kDockLeft, "Left side of the screen", true, windowDock == SnitchProcessor::kDockLeft);
+        dockMenu.addItem(kMenuDock + SnitchProcessor::kDockRight, "Right side of the screen", true, windowDock == SnitchProcessor::kDockRight);
+        menu.addSubMenu("Dock window", dockMenu, dockWindow != nullptr);
         menu.addSeparator();
         menu.addItem(4, "Always on top", true, plugin.alwaysOnTop.load());
     }
@@ -120,6 +229,17 @@ void SnitchEditor::showMenu() {
             const bool onTop = ! self.plugin.alwaysOnTop.load();
             self.plugin.alwaysOnTop.store(onTop);
             if (auto* window = self.getTopLevelComponent()) window->setAlwaysOnTop(onTop);
+        } else if (result == kMenuExpand) {
+            self.setWaveExpanded(! self.plugin.waveExpanded.load());
+        } else if (result == kMenuFreeze) {
+            self.wave.setFrozen(! self.wave.isFrozen());
+        } else if (result >= kMenuWave && result <= kMenuWave + SnitchProcessor::kWaveBottom) {
+            self.plugin.waveDock.store(result - kMenuWave);
+            self.setWaveExpanded(false);
+        } else if (result >= kMenuDock && result <= kMenuDock + SnitchProcessor::kDockRight) {
+            if (self.dockWindow) self.dockWindow(result - kMenuDock);
+        } else if (result >= kMenuChannel && result < kMenuChannel + snitch::kViews) {
+            self.plugin.setChannel(result - kMenuChannel);
         }
     });
 }

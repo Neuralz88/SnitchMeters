@@ -23,6 +23,18 @@ public:
     void loadReferenceFile(const juce::File& file);
     juce::String status() const;
 
+    // Where things sit. Kept here so it is saved with the rest of the state.
+    enum WaveDock { kWaveLeft, kWaveRight, kWaveTop, kWaveBottom };
+    enum WindowDock { kFloating, kDockTop, kDockBottom, kDockLeft, kDockRight };
+    std::atomic<int> waveDock { kWaveTop }, waveZoom { 7 }, waveGain { 0 };
+    std::atomic<float> waveShare { 0.48f };      // of the window, along the side it is docked to
+    std::atomic<bool> waveExpanded { false };    // waveform fills the window
+    std::atomic<int> windowDock { kFloating };   // standalone: which screen edge the window is snapped to
+
+    // Which channel the waveform, spectrum and level numbers show (snitch::View). Saved with the state.
+    int channel() const { return meter.currentView(); }
+    void setChannel(int view) { meter.setView(view); }
+
     std::atomic<bool> alwaysOnTop { true };
     std::atomic<bool> referenceBusy { false };
 

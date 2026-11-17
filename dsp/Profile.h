@@ -38,6 +38,9 @@ struct Snapshot {
     float lowShareDb;       // energy below 150 Hz relative to the total
     float bandShort[kBands], bandLong[kBands];  // dB relative to total band power
     float spectrum[kSpecPoints];                // dBFS (full-scale sine = 0)
+    int   view;             // which channel the fields below follow (Analyser's View)
+    float viewLufsS, viewLufsI, viewTruePeakDb, viewPsr;
+    float viewSpectrum[kSpecPoints];
 };
 
 struct Issue {

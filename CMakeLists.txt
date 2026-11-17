@@ -29,6 +29,20 @@ if(SNITCH_BUILD_PLUGIN)
         GIT_TAG 8.0.4
         GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(JUCE)
+    FetchContent_Declare(clap_juce_extensions
+        GIT_REPOSITORY https://github.com/free-audio/clap-juce-extensions.git
+        GIT_TAG 3837f4a6ed2ab0ba46aba69ae5b7041c7c64ce74)
+    FetchContent_MakeAvailable(clap_juce_extensions)
+
+    # The desktop app listens to system audio through WASAPI, so it is Windows only.
+    # Everywhere else it is the plugin alone.
+    if(WIN32)
+        set(SNITCH_FORMATS VST3 Standalone)
+    elseif(APPLE)
+        set(SNITCH_FORMATS VST3 AU)
+    else()
+        set(SNITCH_FORMATS VST3)
+    endif()
 
     juce_add_plugin(SnitchMeters
         COMPANY_NAME "Monkey Hammer"
@@ -41,14 +55,22 @@ if(SNITCH_BUILD_PLUGIN)
         COPY_PLUGIN_AFTER_BUILD FALSE
         PLUGIN_MANUFACTURER_CODE Mnkh
         PLUGIN_CODE Sntc
+        BUNDLE_ID com.monkeyhammer.snitchmeters
         VST3_CATEGORIES Fx Analyzer
-        FORMATS VST3 Standalone)
+        FORMATS ${SNITCH_FORMATS})
 
     target_sources(SnitchMeters PRIVATE
         plugin/PluginProcessor.cpp
-        plugin/PluginEditor.cpp
-        plugin/LoopbackCapture.cpp
-        plugin/StandaloneApp.cpp)
+        plugin/PluginEditor.cpp)
+    if(WIN32)
+        target_sources(SnitchMeters PRIVATE
+            plugin/LoopbackCapture.cpp
+            plugin/StandaloneApp.cpp)
+    endif()
+
+    clap_juce_extensions_plugin(TARGET SnitchMeters
+        CLAP_ID "com.monkeyhammer.snitchmeters"
+        CLAP_FEATURES audio-effect analyzer utility stereo)
 
     target_compile_definitions(SnitchMeters PUBLIC
         JUCE_WEB_BROWSER=0

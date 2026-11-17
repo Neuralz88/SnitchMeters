@@ -1,0 +1,49 @@
+# Builds the Mac plugins (the desktop app is Windows only) and packs them into one zip.
+name: mac
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4 --target dsp_tests SnitchMeters_VST3 SnitchMeters_AU SnitchMeters_CLAP
+
+      - name: Tests
+        run: ./build/dsp_tests
+
+      - name: Pack
+        run: |
+          mkdir "Snitch Meters Mac"
+          for bundle in "Snitch Meters.vst3" "Snitch Meters.component" "Snitch Meters.clap"; do
+            found="$(find build/SnitchMeters_artefacts -name "$bundle" -maxdepth 3 | head -1)"
+            test -n "$found"
+            cp -R "$found" "Snitch Meters Mac/"
+            codesign --force --deep --sign - "Snitch Meters Mac/$bundle"
+            lipo -archs "Snitch Meters Mac/$bundle/Contents/MacOS/Snitch Meters"
+          done
+          cp tools/mac/Install.command tools/mac/README.txt "Snitch Meters Mac/"
+          chmod +x "Snitch Meters Mac/Install.command"
+          ditto -c -k --keepParent "Snitch Meters Mac" "Snitch Meters Mac.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snitch-meters-mac
+          path: Snitch Meters Mac.zip
+
+      - name: Validate the Audio Unit
+        continue-on-error: true
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R "Snitch Meters Mac/Snitch Meters.component" ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar || true
+          auval -v aufx Sntc Mnkh

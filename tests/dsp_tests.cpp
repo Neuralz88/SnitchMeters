@@ -389,6 +389,118 @@ TEST(baked_profile_sane) {
     }
 }
 
+TEST(wave_history_shape_and_colour) {
+    Analyser a; a.prepare(48000.0);
+    const auto sub = sine(50.0, 0.5, 48000.0, 1.0), hat = sine(8000.0, 0.25, 48000.0, 1.0);
+    feed(a, sub, sub);
+    const long long afterSub = a.waveCount();
+    CHECK_NEAR((double) afterSub, a.waveBucketsPerSecond(), 2.0);
+    feed(a, hat, hat);
+    const long long total = a.waveCount();
+
+    std::vector<WaveBucket> b((size_t) total);
+    a.copyWave(b.data(), 0, (int) total);
+    float lo = 0.0f, hi = 0.0f, peak = 0.0f;
+    for (long long i = afterSub / 2; i < afterSub; ++i) {
+        lo = std::min(lo, b[(size_t) i].lo); hi = std::max(hi, b[(size_t) i].hi); peak = std::max(peak, b[(size_t) i].peak);
+        CHECK(b[(size_t) i].low > 4.0f * b[(size_t) i].mid && b[(size_t) i].low > 4.0f * b[(size_t) i].high);
+    }
+    CHECK_NEAR(lo, -0.5, 0.01); CHECK_NEAR(hi, 0.5, 0.01); CHECK_NEAR(peak, 0.5, 0.01);
+    for (long long i = afterSub + (total - afterSub) / 2; i < total; ++i)
+        CHECK(b[(size_t) i].high > 4.0f * b[(size_t) i].mid && b[(size_t) i].high > 4.0f * b[(size_t) i].low);
+
+    // Outside what exists: zeroed, not garbage.
+    WaveBucket edge[4];
+    a.copyWave(edge, total - 2, 4);
+    CHECK(edge[1].peak > 0.2f && edge[2].peak == 0.0f && edge[3].peak == 0.0f);
+    a.copyWave(edge, -2, 4);
+    CHECK(edge[0].peak == 0.0f && edge[1].peak == 0.0f && edge[2].peak > 0.0f);
+}
+
+TEST(wave_history_wraps) {
+    Analyser a; a.prepare(48000.0);
+    const auto x = sine(100.0, 0.3, 48000.0, 40.0);   // longer than the history
+    feed(a, x, x);
+    const long long total = a.waveCount();
+    CHECK(total > Analyser::kWave);
+    WaveBucket old[2], recent[2];
+    a.copyWave(old, total - Analyser::kWave - 2, 2);
+    a.copyWave(recent, total - Analyser::kWave, 2);
+    CHECK(old[0].peak == 0.0f && old[1].peak == 0.0f);
+    CHECK(recent[0].peak > 0.1f && recent[1].peak > 0.1f);
+}
+
+// ---------------------------------------------------------------- channel views
+
+TEST(view_waveforms) {
+    Analyser a; a.prepare(48000.0);
+    const auto x = sine(100.0, 0.5, 48000.0, 1.0), none = std::vector<float>(x.size(), 0.0f);
+    feed(a, x, none);   // left only
+    const long long total = a.waveCount();
+    const float expected[kViews] = { 0.25f, 0.5f, 0.0f, 0.25f, 0.25f };   // the whole mix is drawn as its mono sum
+    const float peaks[kViews]    = { 0.5f,  0.5f, 0.0f, 0.25f, 0.25f };
+    for (int v = 0; v < kViews; ++v) {
+        std::vector<WaveBucket> b((size_t) total / 2);
+        a.copyWave(b.data(), total / 2, (int) b.size(), v);
+        float hi = 0.0f, peak = 0.0f;
+        for (const WaveBucket& bucket : b) { hi = std::max(hi, bucket.hi); peak = std::max(peak, bucket.peak); }
+        CHECK_NEAR(hi, expected[v], 0.01);
+        CHECK_NEAR(peak, peaks[v], 0.01);
+    }
+}
+
+TEST(view_spectrum_mid_side) {
+    const auto x = sine(1000.0, 0.5, 48000.0, 2.0);
+    std::vector<float> flipped(x.size());
+    for (size_t i = 0; i < x.size(); ++i) flipped[i] = -x[i];
+    auto peakOf = [](const float* spectrum) { float top = -200.0f; for (int j = 0; j < kSpecPoints; ++j) top = std::max(top, spectrum[j]); return top; };
+
+    for (int v = 0; v < kViews; ++v) {
+        Analyser mono; mono.prepare(48000.0); mono.setView(v);
+        feed(mono, x, x);
+        const Snapshot s = mono.snapshot();
+        CHECK(s.view == v);
+        if (v == kViewSide) CHECK(peakOf(s.viewSpectrum) < peakOf(s.spectrum) - 60.0f);
+        else CHECK_NEAR(peakOf(s.viewSpectrum), peakOf(s.spectrum), 0.01);
+
+        Analyser wide; wide.prepare(48000.0); wide.setView(v);
+        feed(wide, x, flipped);
+        const Snapshot w = wide.snapshot();
+        if (v == kViewMid) CHECK(peakOf(w.viewSpectrum) < peakOf(w.spectrum) - 60.0f);
+        else CHECK_NEAR(peakOf(w.viewSpectrum), peakOf(w.spectrum), 0.01);
+    }
+}
+
+TEST(view_levels) {
+    const auto loudSide = sine(997.0, 0.5, 48000.0, 5.0), quietSide = sine(997.0, 0.125, 48000.0, 5.0);
+    Analyser both; both.prepare(48000.0);
+    feed(both, loudSide, loudSide);
+    const Snapshot whole = both.snapshot();
+    CHECK_NEAR(whole.viewLufsS, whole.lufsS, 1e-6);   // the whole mix: the same numbers
+    CHECK_NEAR(whole.viewTruePeakDb, whole.truePeakDb, 1e-6);
+
+    // One channel reads as that channel on both speakers.
+    Analyser a; a.prepare(48000.0); a.setView(kViewLeft);
+    feed(a, loudSide, quietSide);
+    Snapshot s = a.snapshot();
+    CHECK_NEAR(s.viewLufsS, whole.lufsS, 0.05);
+    CHECK_NEAR(s.viewLufsI, whole.lufsI, 0.05);
+    CHECK_NEAR(s.viewTruePeakDb, whole.truePeakDb, 0.05);
+    CHECK_NEAR(s.viewPsr, whole.psr, 0.1);
+
+    a.setView(kViewRight);   // 12 dB down; the numbers start again
+    feed(a, loudSide, quietSide);
+    s = a.snapshot();
+    CHECK_NEAR(s.viewLufsS, whole.lufsS - 12.04, 0.05);
+    CHECK_NEAR(s.viewTruePeakDb, whole.truePeakDb - 12.04, 0.05);
+
+    a.setView(kViewSide);    // (0.5 - 0.125) / 2 = 0.1875: 8.52 dB down
+    feed(a, loudSide, quietSide);
+    s = a.snapshot();
+    CHECK_NEAR(s.viewLufsS, whole.lufsS - 8.52, 0.05);
+    CHECK(allFinite(s));
+}
+
 int main(int argc, char** argv) {
     for (const TestCase& t : tests()) {
         if (argc > 1 && std::strstr(t.name, argv[1]) == nullptr) continue;

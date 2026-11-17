@@ -5,6 +5,7 @@
 
 namespace {
 const juce::uint32 kStateMagic = 0x31544e53; // "SNT1"
+const juce::uint32 kLayoutMagic = 0x3159414c; // "LAY1", after the reference profile
 const double kMaxReferenceSeconds = 15.0 * 60.0;
 }
 
@@ -103,6 +104,14 @@ void SnitchProcessor::getStateInformation(juce::MemoryBlock& destData) {
     out.writeInt((int) kStateMagic);
     out.writeInt((int) sizeof(profile));
     out.write(&profile, sizeof(profile));
+    out.writeInt((int) kLayoutMagic);
+    out.writeInt(waveDock.load());
+    out.writeInt(waveZoom.load());
+    out.writeInt(waveGain.load());
+    out.writeFloat(waveShare.load());
+    out.writeBool(waveExpanded.load());
+    out.writeInt(windowDock.load());
+    out.writeInt(channel());
 }
 
 void SnitchProcessor::setStateInformation(const void* data, int sizeInBytes) {
@@ -114,6 +123,16 @@ void SnitchProcessor::setStateInformation(const void* data, int sizeInBytes) {
     for (int i = 0; i < snitch::kBands; ++i)
         if (! (std::isfinite(profile.band[i]) && std::isfinite(profile.bandLo[i]) && std::isfinite(profile.bandHi[i]))) return;
     if (profile.valid) setReference(profile);
+
+    if (in.getNumBytesRemaining() < 25 || (juce::uint32) in.readInt() != kLayoutMagic) return;
+    waveDock.store(juce::jlimit(0, 3, in.readInt()));
+    waveZoom.store(in.readInt());
+    waveGain.store(in.readInt());
+    const float share = in.readFloat();
+    waveShare.store(std::isfinite(share) ? juce::jlimit(0.1f, 0.9f, share) : 0.48f);
+    waveExpanded.store(in.readBool());
+    windowDock.store(juce::jlimit(0, 4, in.readInt()));
+    if (in.getNumBytesRemaining() >= 4) setChannel(in.readInt());
 }
 
 juce::AudioProcessorEditor* SnitchProcessor::createEditor() { return new SnitchEditor(*this); }

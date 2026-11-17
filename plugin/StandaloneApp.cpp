@@ -5,6 +5,10 @@
 //   --seconds <n>          how long the two modes below run (default 5)
 //   --selftest <out.txt>   no window; write capture device, frames, loudness; exit 0 if audio frames arrived
 //   --screenshot <out.png> no window; save a picture of the meter, then exit
+//   --wave <top|bottom|left|right|full>   where the waveform sits in that picture
+//   --zoom <0..10>         waveform time zoom in that picture (0 = closest)
+//   --size <width>x<height>               size of that picture
+//   --channel <stereo|left|right|mid|side>  which channel that picture shows
 #include "PluginEditor.h"
 #include "LoopbackCapture.h"
 
@@ -42,15 +46,47 @@ private:
 
 class MainWindow : public juce::DocumentWindow {
 public:
-    explicit MainWindow(SnitchProcessor& processor)
-        : DocumentWindow("Snitch Meters", ui::background, DocumentWindow::closeButton | DocumentWindow::minimiseButton) {
+    explicit MainWindow(SnitchProcessor& p)
+        : DocumentWindow("Snitch Meters", ui::background, DocumentWindow::closeButton | DocumentWindow::minimiseButton), processor(p) {
         setUsingNativeTitleBar(true);
         setContentOwned(processor.createEditor(), true);
         setResizable(true, false);
         setResizeLimits(SnitchEditor::kMinWidth, SnitchEditor::kMinHeight, SnitchEditor::kMaxWidth, SnitchEditor::kMaxHeight);
+        if (auto* e = editor()) e->dockWindow = [this](int edge) { dock(edge); };
     }
     void closeButtonPressed() override { juce::JUCEApplication::getInstance()->systemRequestedQuit(); }
     SnitchEditor* editor() { return dynamic_cast<SnitchEditor*>(getContentComponent()); }
+
+    // Snaps the window along one edge of the screen it is on, or lets it float again.
+    void dock(int edge) {
+        const auto* display = juce::Desktop::getInstance().getDisplays().getDisplayForRect(getBounds());
+        if (display == nullptr) return;
+        const int was = processor.windowDock.exchange(edge);
+        if (was == SnitchProcessor::kFloating) floating = getBounds();
+        if (edge == SnitchProcessor::kFloating) {
+            if (floating.isEmpty()) centreWithSize(SnitchEditor::kDefaultWidth, SnitchEditor::kDefaultHeight);
+            else setBounds(floating);
+            return;
+        }
+        auto area = display->userArea;   // bounds are the inside of the window: leave room for its frame
+        if (auto* peer = getPeer())
+            if (const auto frame = peer->getFrameSizeIfPresent()) area = frame->subtractedFrom(area);
+
+        auto isFlat = [](int e) { return e == SnitchProcessor::kDockTop || e == SnitchProcessor::kDockBottom; };
+        const bool keep = was != SnitchProcessor::kFloating && isFlat(was) == isFlat(edge);   // same way round: keep its thickness
+        const int thickness = isFlat(edge) ? juce::jmin(area.getHeight() / 2, keep ? getHeight() : 300)
+                                           : juce::jmin(area.getWidth() / 2, keep ? getWidth() : 380);
+        switch (edge) {
+            case SnitchProcessor::kDockTop:    setBounds(area.removeFromTop(thickness));    break;
+            case SnitchProcessor::kDockBottom: setBounds(area.removeFromBottom(thickness)); break;
+            case SnitchProcessor::kDockLeft:   setBounds(area.removeFromLeft(thickness));   break;
+            default:                           setBounds(area.removeFromRight(thickness));  break;
+        }
+    }
+
+private:
+    SnitchProcessor& processor;
+    juce::Rectangle<int> floating;
 };
 
 class SnitchApp : public juce::JUCEApplication, private juce::Timer {
@@ -82,7 +118,20 @@ public:
             processor->alwaysOnTop.store(settings->getBoolValue("alwaysOnTop", true));
         }
 
+        if (headless) {
+            const juce::String where = argAfter("--wave");
+            const int side = juce::StringArray({ "left", "right", "top", "bottom" }).indexOf(where);
+            if (side >= 0) processor->waveDock.store(side);
+            processor->waveExpanded.store(where == "full");
+            if (argAfter("--zoom").isNotEmpty()) processor->waveZoom.store(argAfter("--zoom").getIntValue());
+            processor->setChannel(juce::StringArray({ "stereo", "left", "right", "mid", "side" }).indexOf(argAfter("--channel")));
+        }
+
         window = std::make_unique<MainWindow>(*processor);
+        const juce::String size = argAfter("--size");
+        if (headless && size.containsChar('x'))
+            if (auto* editor = window->editor())
+                editor->setSize(size.upToFirstOccurrenceOf("x", false, false).getIntValue(), size.fromFirstOccurrenceOf("x", false, false).getIntValue());
         auto push = [this](const float* L, const float* R, int n, double sr) { processor->pushAudio(L, R, n, sr); };
         const juce::String playPath = argAfter("--play");
         if (playPath.isNotEmpty()) {
